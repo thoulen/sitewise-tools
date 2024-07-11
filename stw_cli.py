@@ -2,9 +2,10 @@ import boto3
 import time
 import argparse
 import uuid
-
+from botocore.config import Config
 
 sw_client = boto3.client('iotsitewise')
+sw_client = None
 SCRIPT_TIMEOUT_SECONDS = 60
 MAX_RETRY=3
 SLEEP_BETWEEN_RETRY=0.3
@@ -119,74 +120,77 @@ def delete_assets_hierarchy(father_asset_id=None,father_hierarchy_list=None):
                     sw_client.delete_asset(assetId=child_asset_id)
                     print("Succeed")
                 except  Exception as e:
-                    print(e)
+                    print(str(e))
                     retry +=1
                     continue
 
                 retry = -1
                 
-                    
+
+def delete_model(model_ids):
+    for model_id in model_ids:
+     print(model_id)
+     try:
+        model = sw_client.describe_asset_model(assetModelId=model_id['childAssetModelId'])
+        
+        if model['assetModelStatus']['state'] == 'ACTIVE': 
+                time.sleep(SLEEP_BETWEEN_RETRY)   
+                if len (model['assetModelHierarchies']) > 0 :
+                    delete_model(model['assetModelHierarchies'])
+                
+                print(f"\nDelete Asset Model Name: {model['assetModelName']}, Asset Model Id: {model['assetModelId']}, Status : {model['assetModelStatus']['state'] }")
+                sw_client.delete_asset_model(assetModelId=model['assetModelId'])
+                print("Succeed")
+        else: 
+                print(f"\nSkipped Asset Model Name: {model['assetModelName']}, Asset Model Id: {model['assetModelId']}, Status : {model['assetModelStatus']['state'] }")
+
+     except  Exception as e:
+                print(":Failed")
+                print(str(e))
+
 
 def delete_models(father_model_id=None):
-    if father_model_id is not None:
-        sw_client.delete_asset_model(father_model_id)
-        return 1
-
+    model_ids = []
+    model_list = []
     total_model = 0
-    all_models = []
     next_token = None
-    # Paginate
-    while True:
-        if next_token:
-            response = sw_client.list_asset_models(nextToken=next_token)
-        else:
-            response = sw_client.list_asset_models()
-        associated_assets = response['assetModelSummaries']
-        all_models += associated_assets
-        # Check if there are more pages of results
-        if 'nextToken' in response:
-            next_token = response['nextToken']
-        else:
-            break 
 
-        time.sleep(SLEEP_BETWEEN_RETRY)
-    
-    while True:
-        if next_token:
-            response = sw_client.list_asset_models(nextToken=next_token,assetModelTypes=['ASSET_MODEL','COMPONENT_MODEL'])
-        else:
-            response = sw_client.list_asset_models( assetModelTypes=['ASSET_MODEL','COMPONENT_MODEL'])
+    if father_model_id != 'ALL':
+        model_ids.append({'childAssetModelId':model['id']})
+    else:
+        while True:
+            if next_token:
+                response = sw_client.list_asset_models(nextToken=next_token)
+            else:
+                response = sw_client.list_asset_models()
 
-        associated_assets = response['assetModelSummaries']
-        all_models += associated_assets
-        # Check if there are more pages of results
-        if 'nextToken' in response:
-            next_token = response['nextToken']
-        else:
-            break 
+            associated_assets = response['assetModelSummaries']
+            model_list += associated_assets
+            # Check if there are more pages of results
+            if 'nextToken' in response:
+                next_token = response['nextToken']
+            else:
+                break 
 
-        time.sleep(SLEEP_BETWEEN_RETRY)
-
-
-
-
-    print(all_models)
-    for model in all_models :
+            time.sleep(SLEEP_BETWEEN_RETRY)
+   
+    #replace with MAP
+    for model in model_list:
          try:
-            print(f"\nDelete Asset Model Name: {model['name']}, Asset Model Id: {model['id']}, Status : {model['status']['state'] }")
-            if model['status']['state'] == 'ACTIVE':    
-                sw_client.delete_asset_model(assetModelId=model['id'])
-                print(":Success")
-                time.sleep(SLEEP_BETWEEN_RETRY)
+            if model['status']['state'] == 'ACTIVE':   
+                model_ids = []      
+                model_ids.append({'childAssetModelId':model['id']})
+                delete_model(model_ids)
+
             else: 
-                print('Skipped')
+                print(f"\nSkipped Asset Model Name: {model['name']}, Asset Model Id: {model['id']}, Status : {model['status']['state'] }")
+
 
          except  Exception as e:
                     print(":Failed")
-                    print(e)
+                    print(str(e))
 
-
-    return len(all_models)          
+    return          
 
         
 
@@ -215,7 +219,7 @@ def asset_drop(asset_id):
             asset['name'] = asset['assetName']
             assets_list.append(asset)
         except sw_client.exceptions.ResourceNotFoundException as e:
-            print(e)
+            print(str(e))
             exit
 
     for asset in assets_list:
@@ -232,7 +236,7 @@ def asset_drop(asset_id):
 
 def asset_model_drop(asset_model_id):
     print(f"\nDelete Asset Models")
-    delete_models(father_model_id=None)
+    delete_models(father_model_id=asset_model_id)
 
 
 
@@ -269,31 +273,40 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Add the arguments
     parser.add_argument("--object", help="Object ['model','asset']")
-    parser.add_argument("--operation", help="Operation ['tree','view','drop']")
+    parser.add_argument("--operation", help="Operation ['tree','view','drop','wipe']")
     parser.add_argument("--asset-id", type =sitewise_uuid, default=None, help="ID of the model to delete otherwise all models will be deleted ")
-    parser.add_argument("--wipe", help="Drop all the model", action="store_true")
     parser.add_argument("--all-levels", help="Include all levels in the hierarchy", action="store_true")
+    parser.add_argument("--region", help="AWS Region", default=None)
 
     # Parse the arguments
     args = parser.parse_args()
     # Access the arguments
-    operation = args.operation.strip()
-    sitewise_entity = args.object.strip()
+    operation = args.operation
+    sitewise_entity = args.object
     asset_id = args.asset_id
     include_all_levels = args.all_levels
+
+    sw_client = boto3.client('iotsitewise')
+
+    if args.region is not None:
+        my_config = Config(
+                    region_name = args.region
+                )
+        sw_client = boto3.client('iotsitewise', config=my_config)
+       
     
     print("%s,%s,%s" % (sitewise_entity,operation,asset_id))
-    if (sitewise_entity == 'asset') and (operation == 'drop'):
+    if (sitewise_entity == 'asset') and ((operation == 'drop') or (operation == 'wipe')):
         sitewise_id = args.asset_id
-        if args.wipe:
+        if operation == 'wipe':
             sitewise_id = 'ALL'  
 
         asset_drop(sitewise_id)
         exit
 
-    if (sitewise_entity == 'model') and (operation == 'drop'):
+    if (sitewise_entity == 'model') and ((operation == 'drop') or (operation == 'wipe')):
         sitewise_id = args.asset_id
-        if args.wipe:
+        if operation == 'wipe':
             sitewise_id = 'ALL' 
         asset_model_drop(sitewise_id) 
         exit
